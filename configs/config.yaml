@@ -1,0 +1,52 @@
+# Main configuration file
+defaults:
+  - model: clip_vit_large_patch14
+  - _self_
+
+# Image settings
+image:
+  path: "image3.jpg"
+
+# Device settings
+device: null  # null for auto, "cpu", "cuda", "cuda:0", "cuda:1", or integer (0, 1, 2, ...)
+
+# Output settings
+output:
+  dir: "outputs"
+  save_similarities: true
+  save_visualizations: true
+  format: "png"
+  dpi: 150
+
+# Similarity settings
+similarity:
+  metric: "cosine"  # cosine, dot_product
+  remove_positional_embedding: false  # Remove positional embedding for comparison
+
+# Clustering settings
+clustering:
+  enabled: true
+  threshold_mode: "percentile"  # Available modes:
+                         # - mean, mean+std, mean-std, mean+2std, mean-2std
+                         # - median, median+mad, median-mad
+                         # - q1, q3, iqr_lower, iqr_upper
+                         # - percentile (requires threshold_value)
+                         # - fixed (requires threshold_value)
+  threshold_value: 90  # Required for percentile (0-100) or fixed mode
+  use_cluster_mean: true  # If true, compare each neighbor with the mean of current cluster tokens
+                           # If false, use pre-calculated pairwise similarities (faster)
+  # Examples:
+  #   threshold_mode: "mean+std"  # Mean + 1 standard deviation (stricter)
+  #   threshold_mode: "median-mad"  # Median - MAD (looser)
+  #   threshold_mode: "q3"  # 75th percentile
+  #   threshold_mode: "percentile", threshold_value: 80
+  #   threshold_mode: "fixed", threshold_value: 0.85
+
+# Visualization settings
+visualization:
+  figsize: [20, 16]
+  cmap: "viridis"
+  show_colorbar: true
+  save_individual: true  # Save each similarity type separately
+  save_combined: true    # Save all similarities in one figure
+  cluster_line_width: 2  # Thickness of cluster borders (default: 8)

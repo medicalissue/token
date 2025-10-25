@@ -1,0 +1,7 @@
+# @package _global_
+model:
+  type: "clip-vit-large-patch14-336"
+  name: "openai/clip-vit-large-patch14-336"
+  image_size: 336
+  patch_size: 14
+  grid_size: 24

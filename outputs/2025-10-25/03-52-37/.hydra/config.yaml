@@ -1,0 +1,30 @@
+model:
+  type: clip-vit-large-patch14
+  name: openai/clip-vit-large-patch14
+  image_size: 224
+  patch_size: 14
+  grid_size: 16
+image:
+  path: image.jpg
+device: null
+output:
+  dir: outputs
+  save_similarities: true
+  save_visualizations: true
+  format: png
+  dpi: 150
+similarity:
+  metric: cosine
+clustering:
+  enabled: true
+  threshold_mode: mean
+  threshold_value: null
+visualization:
+  figsize:
+  - 20
+  - 16
+  cmap: viridis
+  show_colorbar: true
+  save_individual: true
+  save_combined: true
+  cluster_line_width: 3

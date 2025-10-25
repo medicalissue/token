@@ -26,8 +26,15 @@ python visualize_clip_tokens.py
 ```python
 from visualize_clip_tokens import CLIPTokenVisualizer
 
-# 모델 초기화 (224x224)
+# 모델 초기화 (224x224, 자동으로 GPU 선택)
 visualizer = CLIPTokenVisualizer("clip-vit-large-patch14")
+
+# 특정 GPU 지정
+visualizer_gpu1 = CLIPTokenVisualizer("clip-vit-large-patch14", device=1)
+visualizer_gpu2 = CLIPTokenVisualizer("clip-vit-large-patch14", device="cuda:2")
+
+# CPU 사용
+visualizer_cpu = CLIPTokenVisualizer("clip-vit-large-patch14", device="cpu")
 
 # 토큰 그리드 시각화
 visualizer.visualize_token_grid(
@@ -45,8 +52,24 @@ visualizer.visualize_token_attention(
 )
 
 # 336x336 모델 사용
-visualizer_336 = CLIPTokenVisualizer("clip-vit-large-patch14-336")
+visualizer_336 = CLIPTokenVisualizer("clip-vit-large-patch14-336", device=0)
 visualizer_336.visualize_token_grid("your_image.jpg", save_path="output_336.png")
+```
+
+### CLI에서 디바이스 지정
+
+```bash
+# GPU 0 사용
+python example_custom.py my_image.jpg --device 0
+
+# GPU 1 사용
+python example_custom.py my_image.jpg clip-vit-large-patch14 --device cuda:1
+
+# CPU 사용
+python example_custom.py my_image.jpg --device cpu
+
+# 두 모델 비교 (GPU 2 사용)
+python example_custom.py my_image.jpg compare --device 2
 ```
 
 ## 출력 파일
