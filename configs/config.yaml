@@ -42,6 +42,30 @@ clustering:
   #   threshold_mode: "percentile", threshold_value: 80
   #   threshold_mode: "fixed", threshold_value: 0.85
 
+  # Adjacent cluster merging based on CLS similarity
+  adjacency_merging:
+    enabled: true  # Enable adjacent cluster merging
+    threshold_mode: "dynamic"  # "dynamic" or "fixed"
+    # Dynamic threshold options:
+    threshold_method: "percentile"  # Only "percentile" is supported for dynamic mode
+    threshold_value: 75  # Percentile value (0-100).
+                            # Lower values = more merging, Higher values = less merging
+                            # Example: 75 = 75th percentile (only top 25% similar clusters merge)
+    fixed_threshold: 0.8  # Used when threshold_mode is "fixed"
+    merge_adjacent_clusters: true  # Actually merge adjacent clusters or just detect
+
+  # Convex Hull-based cluster splitting (for donut-shaped and concave clusters)
+  connectivity_splitting:
+    enabled: true  # Enable convex hull-based cluster splitting
+    min_split_size: 2  # Minimum cluster size to consider splitting
+    hull_threshold: 0.7  # Convex Hull fill ratio threshold (0.0-1.0)
+                         # Lower values = more sensitive to holes/concavities (more splitting)
+                         # Higher values = only very hollow shapes get split
+                         # Examples:
+                         #   0.5: Split clusters that are less than 50% filled
+                         #   0.7: Split clusters that are less than 70% filled (default)
+                         #   0.9: Split only very hollow or donut-shaped clusters
+
 # Visualization settings
 visualization:
   figsize: [20, 16]

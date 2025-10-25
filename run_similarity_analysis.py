@@ -90,6 +90,41 @@ def main(cfg: DictConfig):
 
         cluster_result = clusterer.cluster_bfs(result)
 
+        # 인접 클러스터 병합
+        if cfg.clustering.adjacency_merging.enabled:
+            print("\n" + "="*80)
+            print("Performing adjacent cluster merging based on CLS similarity...")
+
+            from token_similarity_analyzer import AdjacencyMerger
+            adjacency_merger = AdjacencyMerger(
+                threshold_mode=cfg.clustering.adjacency_merging.threshold_mode,
+                threshold_method=cfg.clustering.adjacency_merging.threshold_method,
+                threshold_value=cfg.clustering.adjacency_merging.threshold_value,
+                fixed_threshold=cfg.clustering.adjacency_merging.fixed_threshold
+            )
+
+            if cfg.clustering.adjacency_merging.merge_adjacent_clusters:
+                cluster_result = adjacency_merger.merge_adjacent_clusters(
+                    cluster_result, result
+                )
+            else:
+                # 감지만 수행
+                adjacent_pairs = adjacency_merger.find_adjacent_clusters(cluster_result.cluster_map)
+                print(f"  Found {len(adjacent_pairs)} adjacent cluster pairs (no merging)")
+
+        # Convex Hull 기반 클러스터 분할
+        if cfg.clustering.connectivity_splitting.enabled:
+            print("\n" + "="*80)
+            print("Performing convex hull-based cluster splitting (for donut-shaped and concave clusters)...")
+
+            from token_similarity_analyzer import ConnectivitySplitter
+            splitter = ConnectivitySplitter(
+                min_split_size=cfg.clustering.connectivity_splitting.min_split_size,
+                hull_threshold=cfg.clustering.connectivity_splitting.hull_threshold
+            )
+
+            cluster_result = splitter.split_clusters(cluster_result)
+
         # 클러스터 데이터 저장
         if cfg.output.save_similarities:
             np.savez(

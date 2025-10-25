@@ -637,6 +637,496 @@ class TokenClusterer:
         return result
 
 
+class AdjacencyMerger:
+    """인접 클러스터 감지 및 병합 클래스"""
+
+    def __init__(self, threshold_mode: str = "dynamic", threshold_method: str = "mean-std",
+                 threshold_value: Optional[float] = None, fixed_threshold: float = 0.8):
+        """
+        Args:
+            threshold_mode: "dynamic" 또는 "fixed"
+            threshold_method: 동적 threshold 계산 방식
+            threshold_value: percentile/fixed 모드에서 필요한 값
+            fixed_threshold: 고정 threshold (fixed 모드에서 사용)
+        """
+        self.threshold_mode = threshold_mode
+        self.threshold_method = threshold_method
+        self.threshold_value = threshold_value
+        self.fixed_threshold = fixed_threshold
+        self.cls_similarity_threshold = fixed_threshold  # 기본값
+
+    def find_adjacent_clusters(self, cluster_map: np.ndarray) -> List[Tuple[int, int]]:
+        """
+        서로 인접한 클러스터 쌍들을 찾습니다.
+
+        Args:
+            cluster_map: 클러스터 맵
+
+        Returns:
+            List[Tuple[int, int]]: 인접한 클러스터 ID 쌍들의 리스트
+        """
+        unique_clusters = np.unique(cluster_map)
+        adjacent_pairs = set()  # 중복 방지를 위해 set 사용
+
+        # 모든 좌표를 순회하며 인접한 클러스터 찾기
+        for row in range(cluster_map.shape[0]):
+            for col in range(cluster_map.shape[1]):
+                current_cluster = cluster_map[row, col]
+
+                # 4방향 이웃 확인
+                for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    new_row, new_col = row + dr, col + dc
+
+                    # 그리드 범위 내에 있고 다른 클러스터면
+                    if (0 <= new_row < cluster_map.shape[0] and
+                        0 <= new_col < cluster_map.shape[1]):
+                        neighbor_cluster = cluster_map[new_row, new_col]
+
+                        if current_cluster != neighbor_cluster:
+                            # 정렬하여 쌍 추가 (중복 방지)
+                            pair = tuple(sorted((current_cluster, neighbor_cluster)))
+                            adjacent_pairs.add(pair)
+
+        return list(adjacent_pairs)
+
+    def compute_cluster_token_mean(self, cluster_result: ClusterResult) -> Dict[int, torch.Tensor]:
+        """
+        각 클러스터의 평균 토큰 벡터를 계산합니다.
+
+        Args:
+            cluster_result: 클러스터링 결과
+
+        Returns:
+            Dict[int, torch.Tensor]: 클러스터 ID -> 평균 토큰 벡터
+        """
+        cluster_token_means = {}
+
+        if cluster_result.similarity_result.patch_tokens is None:
+            print("  Warning: patch_tokens not available for token averaging")
+            return cluster_token_means
+
+        patch_tokens = cluster_result.similarity_result.patch_tokens  # (num_patches, hidden_dim)
+        grid_size = cluster_result.cluster_map.shape[0]
+
+        # 패치 토큰들을 그리드 형태로 재배열
+        tokens_grid = patch_tokens.reshape(grid_size, grid_size, -1)  # (grid_size, grid_size, hidden_dim)
+
+        for cluster_id in range(cluster_result.num_clusters):
+            # 해당 클러스터의 좌표들
+            coords = np.argwhere(cluster_result.cluster_map == cluster_id)
+            if len(coords) == 0:
+                continue
+
+            # 해당 좌표들의 토큰들 모으기
+            cluster_tokens = []
+            for row, col in coords:
+                cluster_tokens.append(tokens_grid[row, col])
+
+            # 평균 토큰 계산
+            if cluster_tokens:
+                token_mean = torch.stack(cluster_tokens).mean(dim=0)
+                cluster_token_means[cluster_id] = token_mean
+
+        return cluster_token_means
+
+    def compute_cluster_cls_similarity(self, cluster_result: ClusterResult) -> Dict[int, float]:
+        """
+        각 클러스터의 평균 CLS 토큰 유사도를 계산합니다.
+
+        Args:
+            cluster_result: 클러스터링 결과
+
+        Returns:
+            Dict[int, float]: 클러스터 ID -> 평균 CLS 유사도
+        """
+        cluster_cls_sims = {}
+
+        for cluster_id in range(cluster_result.num_clusters):
+            # 해당 클러스터의 좌표들
+            coords = np.argwhere(cluster_result.cluster_map == cluster_id)
+            if len(coords) == 0:
+                continue
+
+            # 해당 좌표들의 CLS 유사도 평균
+            cls_values = []
+            for row, col in coords:
+                cls_values.append(cluster_result.similarity_result.cls_similarity[row, col])
+
+            cluster_cls_sims[cluster_id] = np.mean(cls_values)
+
+        return cluster_cls_sims
+
+    def compute_dynamic_threshold(self, cls_sims: Dict[int, float]) -> float:
+        """
+        CLS 유사도 통계를 기반으로 동적 threshold를 계산합니다.
+
+        Args:
+            cls_sims: 클러스터 ID -> CLS 유사도
+
+        Returns:
+            float: 계산된 threshold
+        """
+        if not cls_sims:
+            return self.fixed_threshold
+
+        if self.threshold_method == "percentile":
+            if self.threshold_value is None:
+                raise ValueError("threshold_value must be specified for percentile mode")
+
+            # 모든 클러스터 쌍의 CLS 유사도 차이를 계산
+            sim_values = list(cls_sims.values())
+            diffs = []
+            for i in range(len(sim_values)):
+                for j in range(i + 1, len(sim_values)):
+                    diffs.append(abs(sim_values[i] - sim_values[j]))
+
+            if not diffs:
+                return self.fixed_threshold
+
+            # CLS 유사도 차이들의 percentile을 threshold로 사용
+            threshold = np.percentile(diffs, self.threshold_value)
+        elif self.threshold_method == "fixed":
+            threshold = self.fixed_threshold
+        else:
+            raise ValueError(f"Unknown threshold_method: {self.threshold_method}. Only 'percentile' and 'fixed' are supported.")
+
+        # threshold를 [0.0, 1.0] 범위로 클램핑 (CLS 유사도는 0-1 범위)
+        threshold = np.clip(threshold, 0.0, 1.0)
+
+        return threshold
+
+    def merge_adjacent_clusters(self, cluster_result: ClusterResult,
+                               similarity_result: SimilarityResult) -> ClusterResult:
+        """
+        인접한 클러스터들을 CLS 유사도를 기반으로 병합합니다.
+
+        Args:
+            cluster_result: 클러스터링 결과
+            similarity_result: 유사도 결과
+
+        Returns:
+            ClusterResult: 병합된 클러스터링 결과
+        """
+        # 인접한 클러스터 쌍 찾기
+        adjacent_pairs = self.find_adjacent_clusters(cluster_result.cluster_map)
+
+        if not adjacent_pairs:
+            print("  No adjacent clusters found")
+            return cluster_result
+
+        print(f"  Found {len(adjacent_pairs)} adjacent cluster pairs")
+
+        # 각 클러스터의 평균 CLS 유사도 계산
+        cluster_cls_sims = self.compute_cluster_cls_similarity(cluster_result)
+
+        # 동적 threshold 계산
+        if self.threshold_mode == "dynamic":
+            self.cls_similarity_threshold = self.compute_dynamic_threshold(cluster_cls_sims)
+            print(f"  Computed dynamic threshold: {self.cls_similarity_threshold:.4f} (method: {self.threshold_method})")
+
+            # CLS 유사도 통계 정보 출력
+            sim_values = list(cluster_cls_sims.values())
+            print(f"  CLS similarity stats: mean={np.mean(sim_values):.4f}, "
+                  f"std={np.std(sim_values):.4f}, "
+                  f"min={min(sim_values):.4f}, "
+                  f"max={max(sim_values):.4f}")
+
+        # 각 클러스터의 평균 토큰 벡터 계산
+        cluster_token_means = self.compute_cluster_token_mean(cluster_result)
+
+        # 병합할 클러스터 쌍 결정
+        merge_pairs = []
+        for cluster1, cluster2 in adjacent_pairs:
+            cls_sim1 = cluster_cls_sims.get(cluster1, 0)
+            cls_sim2 = cluster_cls_sims.get(cluster2, 0)
+
+            # CLS 유사도 차이가 임계값보다 작으면 병합 후보
+            cls_diff = abs(cls_sim1 - cls_sim2)
+            if cls_diff <= self.cls_similarity_threshold:
+                merge_pairs.append((cluster1, cluster2))
+                print(f"    Adjacent clusters {cluster1} and {cluster2} "
+                      f"(CLS similarity diff: {cls_diff:.4f}, threshold: {self.cls_similarity_threshold:.4f})")
+            else:
+                print(f"    Skip {cluster1}+{cluster2}: CLS similarity diff {cls_diff:.4f} > threshold {self.cls_similarity_threshold:.4f}")
+
+        if not merge_pairs:
+            print("  No adjacent clusters met similarity threshold for merging")
+            return cluster_result
+
+        # 병합 수행 (Union-Find 스타일)
+        parent = {}
+        def find(x):
+            if x not in parent:
+                parent[x] = x
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+
+        def union(x, y):
+            root_x, root_y = find(x), find(y)
+            if root_x != root_y:
+                parent[root_y] = root_x
+
+        # 병합 관계 설정
+        for cluster1, cluster2 in merge_pairs:
+            union(cluster1, cluster2)
+
+        # 새 클러스터 ID 할당
+        unique_roots = {}
+        new_cluster_map = np.zeros_like(cluster_result.cluster_map)
+        next_id = 0
+
+        for cluster_id in range(cluster_result.num_clusters):
+            root = find(cluster_id)
+            if root not in unique_roots:
+                unique_roots[root] = next_id
+                next_id += 1
+            new_id = unique_roots[root]
+
+            # 해당 클러스터의 모든 좌표에 새 ID 할당
+            mask = (cluster_result.cluster_map == cluster_id)
+            new_cluster_map[mask] = new_id
+
+        # 새 클러스터 정보 계산
+        new_num_clusters = next_id
+        new_cluster_sizes = {}
+        for new_id in range(new_num_clusters):
+            new_cluster_sizes[new_id] = np.sum(new_cluster_map == new_id)
+
+        print(f"  Merged {len(merge_pairs)} adjacent cluster pairs")
+        print(f"  Cluster count: {cluster_result.num_clusters} -> {new_num_clusters}")
+
+        return ClusterResult(
+            cluster_map=new_cluster_map,
+            num_clusters=new_num_clusters,
+            cluster_sizes=new_cluster_sizes,
+            threshold=cluster_result.threshold,
+            similarity_result=cluster_result.similarity_result
+        )
+
+
+class ConnectivitySplitter:
+    """Convex Hull 기반 클러스터 분할 클래스"""
+
+    def __init__(self, min_split_size: int = 2, hull_threshold: float = 0.7):
+        """
+        Args:
+            min_split_size: 분할할 최소 클러스터 크기
+            hull_threshold: Convex Hull 채우기 비교 임계값 (낮을수록 더 민감하게 분할)
+        """
+        self.min_split_size = min_split_size
+        self.hull_threshold = hull_threshold
+
+    def compute_convex_hull_area(self, coords: List[Tuple[int, int]]) -> float:
+        """
+        좌표들의 Convex Hull 면적을 계산합니다.
+
+        Args:
+            coords: 좌표 리스트
+
+        Returns:
+            float: Convex Hull 면적
+        """
+        if len(coords) < 3:
+            return float(len(coords))
+
+        try:
+            # scipy가 없는 경우를 대비한 fallback 구현
+            from scipy.spatial import ConvexHull
+            points = np.array(coords)
+            hull = ConvexHull(points)
+            return float(hull.volume)  # 2D에서는 volume이 area
+        except ImportError:
+            # 간단한 bounding box 면적으로 fallback
+            coords_array = np.array(coords)
+            min_coords = coords_array.min(axis=0)
+            max_coords = coords_array.max(axis=0)
+            return float(np.prod(max_coords - min_coords + 1))
+        except Exception:
+            # 오류 발생 시 bounding box 면적으로 fallback
+            coords_array = np.array(coords)
+            min_coords = coords_array.min(axis=0)
+            max_coords = coords_array.max(axis=0)
+            return float(np.prod(max_coords - min_coords + 1))
+
+    def should_split_cluster(self, coords: List[Tuple[int, int]]) -> bool:
+        """
+        클러스터를 분할해야 하는지 결정합니다.
+
+        Args:
+            coords: 클러스터 좌표들
+
+        Returns:
+            bool: 분할하면 True
+        """
+        if len(coords) < self.min_split_size * 2:
+            return False
+
+        # 실제 클러스터 크기
+        actual_size = len(coords)
+
+        # Convex Hull 면적
+        hull_area = self.compute_convex_hull_area(coords)
+
+        # 채우기 비율: 실제 크기 / Convex Hull 면적
+        fill_ratio = actual_size / hull_area
+
+        print(f"    Cluster size: {actual_size}, Hull area: {hull_area:.1f}, "
+              f"Fill ratio: {fill_ratio:.3f}")
+
+        # 채우기 비율이 임계값보다 낮으면 분할 (구멍이 있거나 오목한 형태)
+        return fill_ratio < self.hull_threshold
+
+    def find_optimal_split(self, coords: List[Tuple[int, int]]) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
+        """
+        클러스터의 최적 분할선을 찾습니다.
+
+        Args:
+            coords: 클러스터 좌표들
+
+        Returns:
+            Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]: 분할된 두 좌표 그룹
+        """
+        coords_array = np.array(coords)
+
+        # 클러스터의 중심점 계산
+        center = coords_array.mean(axis=0)
+
+        # 수직 분할과 수평 분할 중 더 좋은 것 선택
+        best_split1, best_split2 = None, None
+        best_score = float('inf')
+
+        # 수직 분할 (좌우)
+        left_coords = []
+        right_coords = []
+        for coord in coords:
+            if coord[1] < center[1]:  # col < center_col
+                left_coords.append(coord)
+            else:
+                right_coords.append(coord)
+
+        if len(left_coords) >= self.min_split_size and len(right_coords) >= self.min_split_size:
+            # 분할 균형성 점수 (더 균등할수록 좋음)
+            balance_score = abs(len(left_coords) - len(right_coords))
+            if balance_score < best_score:
+                best_score = balance_score
+                best_split1, best_split2 = left_coords, right_coords
+
+        # 수평 분할 (상하)
+        top_coords = []
+        bottom_coords = []
+        for coord in coords:
+            if coord[0] < center[0]:  # row < center_row
+                top_coords.append(coord)
+            else:
+                bottom_coords.append(coord)
+
+        if len(top_coords) >= self.min_split_size and len(bottom_coords) >= self.min_split_size:
+            balance_score = abs(len(top_coords) - len(bottom_coords))
+            if balance_score < best_score:
+                best_score = balance_score
+                best_split1, best_split2 = top_coords, bottom_coords
+
+        # 최적 분할을 찾지 못한 경우, 대각선 분할 시도
+        if best_split1 is None:
+            # 주성분 분석 기반 분할 (scipy가 없는 경우 간단한 대각선)
+            try:
+                from sklearn.decomposition import PCA
+                pca = PCA(n_components=1)
+                pca.fit(coords_array)
+                projected = pca.transform(coords_array)
+                median_val = np.median(projected)
+
+                group1, group2 = [], []
+                for i, coord in enumerate(coords):
+                    if projected[i] < median_val:
+                        group1.append(coord)
+                    else:
+                        group2.append(coord)
+
+                if len(group1) >= self.min_split_size and len(group2) >= self.min_split_size:
+                    best_split1, best_split2 = group1, group2
+            except ImportError:
+                # 간단한 대각선 분할 (y = x 기준)
+                diag1, diag2 = [], []
+                for coord in coords:
+                    if coord[0] + coord[1] < 2 * center.mean():
+                        diag1.append(coord)
+                    else:
+                        diag2.append(coord)
+
+                if len(diag1) >= self.min_split_size and len(diag2) >= self.min_split_size:
+                    best_split1, best_split2 = diag1, diag2
+
+        # 최적 분할을 찾지 못한 경우, 임의로 반으로 나눔
+        if best_split1 is None:
+            mid = len(coords) // 2
+            best_split1 = coords[:mid]
+            best_split2 = coords[mid:]
+
+        return best_split1, best_split2
+
+    def split_clusters(self, cluster_result: ClusterResult) -> ClusterResult:
+        """
+        모든 클러스터에 대해 Convex Hull 기반 분할을 수행합니다.
+
+        Args:
+            cluster_result: 클러스터링 결과
+
+        Returns:
+            ClusterResult: 분할된 클러스터링 결과
+        """
+        new_cluster_map = np.full_like(cluster_result.cluster_map, -1)
+        current_cluster_id = 0
+        total_splits = 0
+
+        for cluster_id in range(cluster_result.num_clusters):
+            # 현재 클러스터의 좌표들
+            coords = np.argwhere(cluster_result.cluster_map == cluster_id)
+            coord_list = [(int(row), int(col)) for row, col in coords]
+
+            print(f"  Analyzing cluster {cluster_id} ({len(coord_list)} tokens)...")
+
+            # 분할 여부 확인
+            if self.should_split_cluster(coord_list):
+                # 최적 분할 찾기
+                split1, split2 = self.find_optimal_split(coord_list)
+
+                # 분할 수행
+                for row, col in split1:
+                    new_cluster_map[row, col] = current_cluster_id
+                current_cluster_id += 1
+
+                for row, col in split2:
+                    new_cluster_map[row, col] = current_cluster_id
+                current_cluster_id += 1
+
+                total_splits += 1
+                print(f"    Split cluster {cluster_id} into {len(split1)} and {len(split2)} tokens")
+            else:
+                # 분할하지 않고 그대로 유지
+                for row, col in coord_list:
+                    new_cluster_map[row, col] = current_cluster_id
+                current_cluster_id += 1
+
+        # 새 클러스터 정보 계산
+        new_num_clusters = current_cluster_id
+        new_cluster_sizes = {}
+        for new_id in range(new_num_clusters):
+            new_cluster_sizes[new_id] = np.sum(new_cluster_map == new_id)
+
+        print(f"  Convex Hull-based splitting: {cluster_result.num_clusters} -> {new_num_clusters} clusters")
+        print(f"  Split {total_splits} clusters total")
+
+        return ClusterResult(
+            cluster_map=new_cluster_map,
+            num_clusters=new_num_clusters,
+            cluster_sizes=new_cluster_sizes,
+            threshold=cluster_result.threshold,
+            similarity_result=cluster_result.similarity_result
+        )
+
+
 class SimilarityVisualizer:
     """토큰 유사도 분석 결과를 시각화하는 클래스"""
 
